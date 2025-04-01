@@ -1,0 +1,3 @@
+[submodule "extern/Rose"]
+	path = extern/Rose
+	url = https://github.com/Shmaug/Rose
