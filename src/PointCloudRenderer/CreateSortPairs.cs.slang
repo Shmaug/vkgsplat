@@ -5,15 +5,14 @@ using namespace vkgsplat;
 
 ByteAddressBuffer vertices;
 uniform float3 cameraPosition;
-uniform float3 cameraForward;
 uniform uint   vertexCount;
 
 RWStructuredBuffer<uint2> sortPairs;
 
 float getSortKey(const uint vertexId) {
     const float3 vertex = vertices.Load<float3>(vertexId * sizeof(float3));
-    const float depth = dot(cameraForward, vertex - cameraPosition);
-    return abs(depth);
+    const float3 toVertex = vertex - cameraPosition;
+    return dot(toVertex, toVertex);
 }
 
 [shader("compute")]

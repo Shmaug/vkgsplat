@@ -4,7 +4,7 @@
 #include <Rose/Core/PipelineCache.hpp>
 #include <Rose/Render/ViewportCamera.hpp>
 
-#include "Scene/GaussianScene.hpp"
+#include "Scene/PointCloudScene.hpp"
 
 using namespace RoseEngine;
 
@@ -13,52 +13,43 @@ namespace vkgsplat {
 struct PointCloudRenderer {
 	PipelineCache createSortPairsPipeline = PipelineCache(FindShaderPath("CreateSortPairs.cs.slang"));
 	PipelineCache rasterPointsPipeline = PipelineCache({
-		{ FindShaderPath("PointCloudRenderer.3d.slang"), "vsmain" },
+		{ FindShaderPath("PointCloudRenderer.3d.slang"), "meshmain" },
 		{ FindShaderPath("PointCloudRenderer.3d.slang"), "fsmain" }
 	});
 
-	float pointSize = 10.f;
+	float pointSize = 0.01f;
     
-	BufferRange<uint2> sortPairs;
 	RadixSort radixSort;
 
     inline void DrawGui(CommandContext& context) {
-        ImGui::DragFloat("Point size", &pointSize, .5f, 0.f, 4000.f);
+        ImGui::DragFloat("Point size", &pointSize, .01f, 0.f, 4000.f);
     }
 
 	inline void Render(
-        CommandContext&       context,
-        const ImageView&      renderTarget,
-        const GaussianScene&  scene,
-        const ViewportCamera& camera,
-        const Transform&      sceneToWorld) {
+        CommandContext&        context,
+        const ImageView&       renderTarget,
+        const PointCloudScene& scene,
+        const Transform&       sceneToCamera,
+        const Transform&       projection) {
 
         const uint2 renderExtent = renderTarget.Extent();
 
-        const Transform worldToScene = inverse(sceneToWorld);
-        const Transform cameraToWorld = camera.GetCameraToWorld();
-        const Transform worldToCamera = inverse(cameraToWorld);
-        const Transform sceneToCamera = worldToCamera * sceneToWorld;
         const Transform cameraToScene = inverse(sceneToCamera);
-        const Transform projection = camera.GetProjection((float)renderExtent.x / (float)renderExtent.y);
+		const float3 cameraPosScene = cameraToScene.TransformPoint(float3(0));
 
-		const float3 cameraPosScene = worldToScene.TransformPoint(camera.position);
+        BufferRange<uint2> sortPairs;
 
-		if (scene.GetVertices()) {
-            const auto& vertices = scene.GetVertices();
-            
-            if (!sortPairs || sortPairs.size() != vertices.size())
-                sortPairs = Buffer::Create(context.GetDevice(), vertices.size()*sizeof(uint2), vk::BufferUsageFlagBits::eStorageBuffer);
-
+        const uint32_t vertexCount = (uint32_t)scene.GetVertices().size();
+		if (vertexCount > 0) {
+	        sortPairs = context.GetTransientBuffer<uint2>(vertexCount, vk::BufferUsageFlagBits::eStorageBuffer);
             context.PushDebugLabel("Sort points");
 
             ShaderParameter params = {};
             params["sortPairs"] = (BufferParameter)sortPairs;
-            params["vertices"]  = (BufferParameter)vertices;
+            params["vertices"]  = (BufferParameter)scene.GetVertices();
             params["cameraPosition"] = cameraPosScene;
-            params["cameraForward"]  = normalize(transpose(cameraToScene).TransformVector(float3(0,0,1)));
-            params["vertexCount"] = (uint32_t)vertices.size();
-            context.Dispatch(*createSortPairsPipeline.get(context.GetDevice()), vertices.size(), params);
+            params["vertexCount"] = vertexCount;
+            context.Dispatch(*createSortPairsPipeline.get(context.GetDevice()), vertexCount, params);
 
             radixSort(context, sortPairs);
             
@@ -77,12 +68,12 @@ struct PointCloudRenderer {
         GraphicsPipelineInfo pipelineInfo {
             .vertexInputState = {},
             .inputAssemblyState = vk::PipelineInputAssemblyStateCreateInfo{
-                .topology = vk::PrimitiveTopology::ePointList },
+                .topology = vk::PrimitiveTopology::eTriangleList },
             .rasterizationState = vk::PipelineRasterizationStateCreateInfo{
                 .depthClampEnable = false,
                 .rasterizerDiscardEnable = false,
-                .polygonMode = vk::PolygonMode::ePoint,
-                .cullMode = vk::CullModeFlagBits::eFront,
+                .polygonMode = vk::PolygonMode::eFill,
+                .cullMode = vk::CullModeFlagBits::eNone,
                 .frontFace = vk::FrontFace::eCounterClockwise,
                 .depthBiasEnable = false },
             .multisampleState = vk::PipelineMultisampleStateCreateInfo{},
@@ -95,7 +86,7 @@ struct PointCloudRenderer {
             .viewports = { vk::Viewport{} },
             .scissors = { vk::Rect2D{} },
             .colorBlendState = ColorBlendState{
-                .attachments = { GaussianScene::GetTransmittanceBlendState() } },
+                .attachments = { PointCloudScene::GetTransmittanceBlendState() } },
             .dynamicStates = { vk::DynamicState::eViewport, vk::DynamicState::eScissor },
             .dynamicRenderingState = DynamicRenderingState{
                 .colorFormats = { renderTarget.GetImage()->Info().format } } };
@@ -104,11 +95,12 @@ struct PointCloudRenderer {
 
         // prepare draw parameters
         {
-
+            Transform t = transpose(sceneToCamera);
             ShaderParameter params = {};
             params["viewProjection"] = projection * sceneToCamera;
-            params["cameraPosition"] = cameraPosScene;
-			params["pointCloud"] = scene.GetPointCloudParams();
+            params["cameraUp"] = t.TransformVector(float3(0,1,0));
+            params["cameraRight"] = t.TransformVector(float3(1,0,0));
+			params["pointCloud"] = scene.GetShaderParameter();
 			params["sortPairs"] = (BufferParameter)sortPairs;
             params["pointSize"] = pointSize;
 
@@ -136,11 +128,13 @@ struct PointCloudRenderer {
 		context->setViewport(0, vk::Viewport{ 0, 0, (float)renderExtent.x, (float)renderExtent.y, 0, 1});
 		context->setScissor(0,  vk::Rect2D{ {0, 0}, { renderExtent.x, renderExtent.y }});
 		
-		if (scene.GetVertices())
+		if (vertexCount > 0)
 		{
             context->bindPipeline(vk::PipelineBindPoint::eGraphics, **drawPipeline);
             context.BindDescriptors(*drawPipeline.Layout(), *drawDescriptorSets);
-            context->draw((uint32_t)scene.GetVertices().size(), 1, 0, 0);
+
+            const uint32_t vertsPerGroup = drawPipeline.GetShader()->WorkgroupSize().x/4;
+            context->drawMeshTasksEXT((vertexCount + vertsPerGroup-1) / vertsPerGroup, 1, 1);
 		}
 	
 		context->endRendering();
