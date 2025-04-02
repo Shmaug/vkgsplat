@@ -32,10 +32,7 @@ struct PointCloudRenderer {
         const Transform&       sceneToCamera,
         const Transform&       projection) {
 
-        const uint2 renderExtent = renderTarget.Extent();
-
-        const Transform cameraToScene = inverse(sceneToCamera);
-		const float3 cameraPosScene = cameraToScene.TransformPoint(float3(0));
+        // sort points by distance to camera
 
         BufferRange<uint2> sortPairs;
 
@@ -47,7 +44,7 @@ struct PointCloudRenderer {
             ShaderParameter params = {};
             params["sortPairs"] = (BufferParameter)sortPairs;
             params["vertices"]  = (BufferParameter)scene.GetVertices();
-            params["cameraPosition"] = cameraPosScene;
+            params["cameraPosition"] = inverse(sceneToCamera).TransformPoint(float3(0));
             params["vertexCount"] = vertexCount;
             context.Dispatch(*createSortPairsPipeline.get(context.GetDevice()), vertexCount, params);
 
@@ -56,12 +53,7 @@ struct PointCloudRenderer {
             context.PopDebugLabel();
         }
 
-        context.AddBarrier(renderTarget, Image::ResourceState{
-            .layout = vk::ImageLayout::eColorAttachmentOptimal,
-            .stage  = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
-            .access =  vk::AccessFlagBits2::eColorAttachmentRead|vk::AccessFlagBits2::eColorAttachmentWrite,
-            .queueFamily = context.QueueFamily() });
-        context.ExecuteBarriers();
+        // prepare draw pipeline
 
 		ShaderDefines defines;
         
@@ -107,7 +99,16 @@ struct PointCloudRenderer {
             context.UpdateDescriptorSets(*drawDescriptorSets, params, *drawPipeline.Layout());
         }
 
-        // rasterization
+        // rasterize points
+
+        const uint2 renderExtent = renderTarget.Extent();
+
+        context.AddBarrier(renderTarget, Image::ResourceState{
+            .layout = vk::ImageLayout::eColorAttachmentOptimal,
+            .stage  = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+            .access =  vk::AccessFlagBits2::eColorAttachmentRead|vk::AccessFlagBits2::eColorAttachmentWrite,
+            .queueFamily = context.QueueFamily() });
+        context.ExecuteBarriers();
 
 		vk::RenderingAttachmentInfo attachments[1] = {
 			vk::RenderingAttachmentInfo {

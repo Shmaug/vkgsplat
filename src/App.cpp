@@ -59,7 +59,7 @@ int main(int argc, const char** argv) {
 		}
 
 		if (ImGui::CollapsingHeader("Scene")) {
-			ImGui::Text("%u views", scene.GetImages().size());
+			ImGui::Text("%u views",    scene.GetImages().size());
 			ImGui::Text("%u vertices", scene.GetVertices().size());
 			ImGui::DragFloat3("Translation", &sceneTranslation.x, 0.1f);
 			ImGui::DragFloat3("Rotation", &sceneRotation.x, float(M_1_PI)*0.1f, -float(M_PI), float(M_PI));
