@@ -5,14 +5,15 @@ using namespace vkgsplat;
 
 ByteAddressBuffer vertices;
 uniform float4x4 view;
-uniform uint   vertexCount;
+uniform int zSign;
+uniform uint vertexCount;
 
 RWStructuredBuffer<uint2> sortPairs;
 
 float getSortKey(const uint vertexId) {
     float3 vertex = vertices.Load<float3>(vertexId * sizeof(float3));
     vertex = mul(view, float4(vertex, 1)).xyz;
-    return -vertex.z;
+    return zSign * vertex.z;
 }
 
 [shader("compute")]

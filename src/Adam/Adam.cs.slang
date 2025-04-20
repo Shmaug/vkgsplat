@@ -1,16 +1,11 @@
 // Alg. 1, "ADAM: A METHOD FOR STOCHASTIC OPTIMIZATION"
 // https://arxiv.org/pdf/1412.6980
 
-typedef float ParameterType;
-
 static const float kEpsilon = 1e-6;
 
-RWStructuredBuffer<ParameterType> parameters;
-StructuredBuffer<ParameterType>   gradients; // gradient of parameters
-
-// 1st and 2nd moment vectors.
-// size: 2*len(parameters)
-RWStructuredBuffer<ParameterType> moments;
+RWStructuredBuffer<float> parameters;
+StructuredBuffer<float>   gradients; // gradient of parameters
+RWStructuredBuffer<float2> moments; // 1st and 2nd moments of gradients
 
 [[vk::push_constant]]
 cbuffer PushConstants
@@ -30,35 +25,41 @@ void main(uint3 threadId: SV_DispatchThreadID)
     if (any(i >= parameterCount))
         return;
 
-    // gradient at t w.r.t. parameters at t-1
-    const ParameterType g_t  = (t == 0) ? 0 : gradients[i];
-
-    // get moments at t-1
-    const ParameterType m_t1 = (t == 0) ? 0 : moments[2*i + 0];
-    const ParameterType v_t1 = (t == 0) ? 0 : moments[2*i + 1];
+   
+    float g_t; // gradient at t w.r.t. parameters at t-1
+    float2 m_t1; // moments at t-1
+    if (t == 0) {
+        g_t = 0;
+        m_t1 = 0;
+    } else {
+        g_t = gradients[i];
+        m_t1 = moments[i];
+    }
 
     // compute moments at t
-    const ParameterType m_t = lerp(g_t,       m_t1, decayRates.x);
-    const ParameterType v_t = lerp(g_t * g_t, v_t1, decayRates.y);
+    const float2 m_t = lerp(float2(g_t, g_t * g_t), m_t1, decayRates);
 
-    moments[2*i + 0] = m_t;
-    moments[2*i + 1] = v_t;
+    moments[i] = m_t;
 
     /*
 
     // compute bias-corrected moments at t
-    const ParameterType mhat_t = m_t / (1 - pow(decayRates.x, t));
-    const ParameterType vhat_t = v_t / (1 - pow(decayRates.y, t));
+    const float2 mhat_t = m_t / (1 - pow(decayRates, t));
 
-    // compute parameters at t
-    parameters[i] -= stepSize * mhat_t / (sqrt(vhat_t) + kEpsilon);
+    const float dx = stepSize * mhat_t.x / (sqrt(mhat_t.y) + kEpsilon);
 
     /*/
 
-    const float alpha_t = stepSize * sqrt(1 - pow(decayRates.y, t)) / (1 - pow(decayRates.x, t));
+    const float2 a = 1 - pow(decayRates, t);
+    const float alpha_t = stepSize * sqrt(a.y) / a.x;
 
     // compute parameters at t
-    parameters[i] -= alpha_t * m_t / (sqrt(v_t) + kEpsilon);
+    const float dx = alpha_t * m_t.x / (sqrt(m_t.y) + kEpsilon);
 
     //*/
+
+    // compute parameters at t
+    if (all(dx == dx) && !any(isnan(dx)))
+        parameters[i] -= dx;
+
 }

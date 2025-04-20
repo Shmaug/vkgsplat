@@ -28,6 +28,7 @@ struct PointCloudScene {
 	BufferRange<float4x4>  projectionTransforms;
 
 	PointCloud pointCloud;
+	uint32_t numTrainCameras;
 
 	inline void Load(CommandContext& context, const std::filesystem::path& p) {
 		using namespace nlohmann;
@@ -51,6 +52,8 @@ struct PointCloudScene {
 		const json trainCameras = pointCloudData["train_cameras"];
 		const json testCameras  = pointCloudData["test_cameras"];
 
+		numTrainCameras = (uint32_t)trainCameras.size();
+
 		images.reserve(trainCameras.size() + testCameras.size());
 		viewTransformsCpu.reserve(trainCameras.size() + testCameras.size());
 		projectionTransformsCpu.reserve(trainCameras.size() + testCameras.size());
@@ -64,13 +67,7 @@ struct PointCloudScene {
 							.format = d.format,
 							.extent = d.extent,
 							.mipLevels = 1,
-							.queueFamilies = { context.QueueFamily() } }),
-						vk::ImageSubresourceRange{
-							.aspectMask = vk::ImageAspectFlagBits::eColor,
-							.baseMipLevel = 0,
-							.levelCount = 1,
-							.baseArrayLayer = 0,
-							.layerCount = 1 });
+							.queueFamilies = { context.QueueFamily() } }));
 					if (img) context.Copy(d.data, img);
 					images.emplace_back(img);
 					viewTransformsCpu.emplace_back(json2float4x4(c["view"]));
@@ -88,8 +85,8 @@ struct PointCloudScene {
 		for (const auto& v : pointCloudData["points"]) vertices    .emplace_back(v[0].get<float>(), v[1].get<float>(), v[2].get<float>());
 		for (const auto& v : pointCloudData["colors"]) vertexColors.emplace_back(v[0].get<float>(), v[1].get<float>(), v[2].get<float>(), 1.0f);
 		
-		pointCloud.vertices      = context.UploadData(vertices,     vk::BufferUsageFlagBits::eStorageBuffer);
-		pointCloud.vertexColors  = context.UploadData(vertexColors, vk::BufferUsageFlagBits::eStorageBuffer);
+		pointCloud.vertices     = context.UploadData(vertices,     vk::BufferUsageFlagBits::eStorageBuffer|vk::BufferUsageFlagBits::eTransferSrc);
+		pointCloud.vertexColors = context.UploadData(vertexColors, vk::BufferUsageFlagBits::eStorageBuffer|vk::BufferUsageFlagBits::eTransferSrc);
 	}
 };
 
