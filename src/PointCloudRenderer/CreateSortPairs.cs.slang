@@ -4,15 +4,15 @@ import Rose.Core.MathUtils;
 using namespace vkgsplat;
 
 ByteAddressBuffer vertices;
-uniform float3 cameraPosition;
+uniform float4x4 view;
 uniform uint   vertexCount;
 
 RWStructuredBuffer<uint2> sortPairs;
 
 float getSortKey(const uint vertexId) {
-    const float3 vertex = vertices.Load<float3>(vertexId * sizeof(float3));
-    const float3 toVertex = vertex - cameraPosition;
-    return dot(toVertex, toVertex);
+    float3 vertex = vertices.Load<float3>(vertexId * sizeof(float3));
+    vertex = mul(view, float4(vertex, 1)).xyz;
+    return -vertex.z;
 }
 
 [shader("compute")]
@@ -23,7 +23,7 @@ void main(uint3 threadId: SV_DispatchThreadID) {
         return;
 
     const float keyf = getSortKey(vertexId);
-    const uint  key = (keyf != keyf || isnan(keyf) || isinf(keyf)) ? UINT32_MAX : order_preserving_float_map(keyf);
+    const uint  key = (keyf != keyf || isnan(keyf) || isinf(keyf) || keyf == FLT_MAX) ? UINT32_MAX : order_preserving_float_map(keyf);
 
     sortPairs[vertexId] = uint2(key, vertexId);
 }

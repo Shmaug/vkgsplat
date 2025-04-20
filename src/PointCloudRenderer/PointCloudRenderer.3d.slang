@@ -1,9 +1,9 @@
-import Scene.PointCloudScene;
+import Scene.PointCloud;
 import Rose.Core.MathUtils;
 
 using namespace RoseEngine;
 
-ParameterBlock<PointCloudScene> pointCloud;
+ParameterBlock<PointCloud> pointCloud;
 StructuredBuffer<uint2> sortPairs;
 uniform float4x4 viewProjection;
 uniform float3   cameraUp;
@@ -12,7 +12,7 @@ uniform float    pointSize;
 
 struct v2f {
     float4 pos : SV_Position;
-    nointerpolation float3 color : COLOR;
+    nointerpolation float4 color : COLOR;
 };
 
 static const uint3 kQuadMeshIndices[] = {
@@ -46,7 +46,7 @@ void meshmain(
     const uint localPointId = localIdx / 4;
 
     float3 vertex = FLT_MAX;
-    float3 vertexColor = 0;
+    float4 vertexColor = 0;
     if (groupBasePointId + localIdx < pointCloud.numVertices)
     {
         const uint sortedVertexId = sortPairs[groupBasePointId + localIdx].y;
@@ -73,7 +73,6 @@ void meshmain(
 }
 
 [shader("fragment")]
-float4 fsmain(float3 color: COLOR) : SV_Target {
-    float alpha = 0.5 + 0.5 * saturate(luminance(color));
-    return float4(color * alpha, 1 - alpha);
+float4 fsmain(float4 color: COLOR) : SV_Target {
+    return float4(color.rgb * color.a, 1 - color.a);
 }

@@ -59,8 +59,8 @@ int main(int argc, const char** argv) {
 		}
 
 		if (ImGui::CollapsingHeader("Scene")) {
-			ImGui::Text("%u views",    scene.GetImages().size());
-			ImGui::Text("%u vertices", scene.GetVertices().size());
+			ImGui::Text("%u views",    scene.images.size());
+			ImGui::Text("%u vertices", scene.pointCloud.vertices.size());
 			ImGui::DragFloat3("Translation", &sceneTranslation.x, 0.1f);
 			ImGui::DragFloat3("Rotation", &sceneRotation.x, float(M_1_PI)*0.1f, -float(M_PI), float(M_PI));
 			ImGui::DragFloat("Scale", &sceneScale, 0.01f, 0.f, 1000.f);
@@ -109,11 +109,11 @@ int main(int argc, const char** argv) {
 
 		// render the scene into viewportRenderTarget
 		
-		context.PushDebugLabel("GaussianRenderer::Render");
+		context.PushDebugLabel("App::Render");
 
         const Transform view = inverse(camera.GetCameraToWorld()) * getSceneToWorld();
 		const Transform proj = camera.GetProjection(extentf.x / extentf.y);
-		renderer.Render(context, viewportRenderTarget, scene, view, proj);
+		renderer.Render(context, viewportRenderTarget, scene.pointCloud, view, proj);
 		
 		// compute alpha = 1 - T
 		{
@@ -128,16 +128,16 @@ int main(int argc, const char** argv) {
 	}, true, WindowedApp::WidgetFlagBits::eNoBorders);
 
 	app.AddWidget("Input Views", [&]() {
-		if (!scene.GetImages().empty())
+		if (!scene.images.empty())
 		{
 			ImGui::SetNextItemWidth(75);
-			ImGui::DragInt("View", &selectedView, 1.f, -1, scene.GetImages().size()-1);
-			if (selectedView >= scene.GetImages().size()) selectedView = scene.GetImages().size()-1;
+			ImGui::DragInt("View", &selectedView, 1.f, -1, scene.images.size()-1);
+			if (selectedView >= scene.images.size()) selectedView = scene.images.size()-1;
 			if (selectedView >= 0) {
 				ImGui::SameLine();
 				ImGui::Checkbox("Render view", &renderSelectedView);
 
-				ImageView img = scene.GetImages()[selectedView];
+				ImageView img = scene.images[selectedView];
 				
 				if (renderSelectedView) {
 					CommandContext& context = app.CurrentContext();
@@ -159,9 +159,9 @@ int main(int argc, const char** argv) {
 
 					context.PushDebugLabel("GaussianRenderer::Render");
 
-					const Transform view = Transform{ scene.GetViewsCpu()[selectedView] };
-					const Transform proj = Transform{ scene.GetProjectionsCpu()[selectedView] };
-					renderer.Render(context, inputViewRenderTarget, scene, view, proj);
+					const Transform view = Transform{ scene.viewTransformsCpu[selectedView] };
+					const Transform proj = Transform{ scene.projectionTransformsCpu[selectedView] };
+					renderer.Render(context, inputViewRenderTarget, scene.pointCloud, view, proj);
 					
 					// compute alpha = 1 - T
 					{
@@ -185,7 +185,7 @@ int main(int argc, const char** argv) {
 				ImGui::Image(Gui::GetTextureID(img), ImVec2(extent.x, extent.y));
 			}
 		}
-	}, true);
+	}, true, WindowedApp::WidgetFlagBits::eNoBorders);
 
 	app.Run();
 

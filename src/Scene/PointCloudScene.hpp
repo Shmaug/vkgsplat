@@ -7,50 +7,27 @@ namespace vkgsplat {
 
 using namespace RoseEngine;
 
+struct PointCloud {
+	BufferRange<float3> vertices;
+	BufferRange<float4> vertexColors;
+
+	inline ShaderParameter GetShaderParameter() const {
+		ShaderParameter params = {};
+		params["vertices"]    = (BufferParameter)vertices;
+		params["colors"]      = (BufferParameter)vertexColors;
+		params["numVertices"] = (uint32_t)vertices.size();
+		return params;
+	}
+};
+
 struct PointCloudScene {
-private:
 	std::vector<ImageView> images;
 	std::vector<float4x4>  viewTransformsCpu;
 	std::vector<float4x4>  projectionTransformsCpu;
 	BufferRange<float4x4>  viewTransforms;
 	BufferRange<float4x4>  projectionTransforms;
 
-	BufferRange<float3> vertices;
-	BufferRange<float3> vertexColors;
-
-public:
-	// We store transmittance=1-alpha in the alpha channel
-	static constexpr vk::PipelineColorBlendAttachmentState GetTransmittanceBlendState() {
-		return vk::PipelineColorBlendAttachmentState {
-			.blendEnable         = true,
-			.srcColorBlendFactor = vk::BlendFactor::eDstAlpha,
-			.dstColorBlendFactor = vk::BlendFactor::eOne,
-			.colorBlendOp        = vk::BlendOp::eAdd,
-			.srcAlphaBlendFactor = vk::BlendFactor::eDstAlpha,
-			.dstAlphaBlendFactor = vk::BlendFactor::eZero,
-			.alphaBlendOp        = vk::BlendOp::eAdd,
-			.colorWriteMask      = vk::ColorComponentFlags{vk::FlagTraits<vk::ColorComponentFlagBits>::allFlags} };
-	}
-
-	inline const auto& GetImages() const { return images; }
-	inline const auto& GetViewsCpu() const { return viewTransformsCpu; }
-	inline const auto& GetProjectionsCpu() const { return projectionTransformsCpu; }
-	inline const auto& GetViews() const { return viewTransforms; }
-	inline const auto& GetProjections() const { return projectionTransforms; }
-
-	inline const auto& GetVertices() const { return vertices; }
-	inline const auto& GetVertexColors() const { return vertexColors; }
-
-	inline ShaderParameter GetShaderParameter() const {
-		ShaderParameter params = {};
-		params["vertices"]    = (BufferParameter)vertices;
-		params["colors"]      = (BufferParameter)vertexColors;
-		params["views"]       = (BufferParameter)viewTransforms;
-		params["projections"] = (BufferParameter)projectionTransforms;
-		params["numVertices"] = (uint32_t)vertices.size();
-		params["numViews"]    = (uint32_t)images.size();
-		return params;
-	}
+	PointCloud pointCloud;
 
 	inline void Load(CommandContext& context, const std::filesystem::path& p) {
 		using namespace nlohmann;
@@ -62,16 +39,6 @@ public:
 					v[j][i] = serialized[i][j].get<float>();
 			return v;
 		};
-		auto json2float3buf = [&](const json& serialized) {
-			std::vector<float3>  data;
-			data.reserve(serialized.size());
-			for (const auto& v : serialized)
-				data.emplace_back(
-					v[0].get<float>(),
-					v[1].get<float>(),
-					v[2].get<float>());			
-			return context.UploadData(data, vk::BufferUsageFlagBits::eStorageBuffer);
-		};
 
 		const std::filesystem::path imageDir = p.parent_path() / p.stem();
 
@@ -80,9 +47,9 @@ public:
 		projectionTransformsCpu.clear();
 		
 		std::ifstream fs(p);
-		const json pointCloud = json::parse(fs);
-		const json trainCameras = pointCloud["train_cameras"];
-		const json testCameras  = pointCloud["test_cameras"];
+		const json pointCloudData = json::parse(fs);
+		const json trainCameras = pointCloudData["train_cameras"];
+		const json testCameras  = pointCloudData["test_cameras"];
 
 		images.reserve(trainCameras.size() + testCameras.size());
 		viewTransformsCpu.reserve(trainCameras.size() + testCameras.size());
@@ -114,8 +81,15 @@ public:
 		viewTransforms       = context.UploadData(viewTransformsCpu,       vk::BufferUsageFlagBits::eStorageBuffer);
 		projectionTransforms = context.UploadData(projectionTransformsCpu, vk::BufferUsageFlagBits::eStorageBuffer);
 
-		vertices      = json2float3buf(pointCloud["points"]);
-		vertexColors  = json2float3buf(pointCloud["colors"]);
+		std::vector<float3> vertices;
+		std::vector<float4> vertexColors;
+		vertices.reserve(pointCloudData["points"].size());
+		vertexColors.reserve(pointCloudData["colors"].size());
+		for (const auto& v : pointCloudData["points"]) vertices    .emplace_back(v[0].get<float>(), v[1].get<float>(), v[2].get<float>());
+		for (const auto& v : pointCloudData["colors"]) vertexColors.emplace_back(v[0].get<float>(), v[1].get<float>(), v[2].get<float>(), 1.0f);
+		
+		pointCloud.vertices      = context.UploadData(vertices,     vk::BufferUsageFlagBits::eStorageBuffer);
+		pointCloud.vertexColors  = context.UploadData(vertexColors, vk::BufferUsageFlagBits::eStorageBuffer);
 	}
 };
 
