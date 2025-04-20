@@ -1,65 +1,64 @@
-// Alg. 1, "ADAM: A METHOD FOR STOCHASTIC OPTIMIZATION"
+// "ADAM: A METHOD FOR STOCHASTIC OPTIMIZATION"
 // https://arxiv.org/pdf/1412.6980
+
+import BufferGradient;
+
+#ifndef NUM_CHANNELS
+#define NUM_CHANNELS 1
+#endif
+static const uint N = NUM_CHANNELS;
 
 static const float kEpsilon = 1e-6;
 
-RWStructuredBuffer<float> parameters;
-StructuredBuffer<float>   gradients; // gradient of parameters
-RWStructuredBuffer<float2> moments; // 1st and 2nd moments of gradients
+BufferGradient<N> parameters;
+
+typedef BufferGradient<N>::T T;
 
 [[vk::push_constant]]
 cbuffer PushConstants
 {
     uint   parameterCount; // number of parameters
-    uint   t; // iteration index
-    float2 decayRates; // β1, β2
     float  stepSize;   // α
+    float2 decayRates; // β1, β2
+    uint   t; // iteration index
 };
 
 [shader("compute")]
 [numthreads(32, 1, 1)]
 void main(uint3 threadId: SV_DispatchThreadID)
 {
-    const uint i = threadId.x;
+    const uint index = threadId.x;
     
-    if (any(i >= parameterCount))
+    if (any(index >= parameterCount))
         return;
 
-   
-    float g_t; // gradient at t w.r.t. parameters at t-1
-    float2 m_t1; // moments at t-1
+    T g_t;  // gradient at t w.r.t. parameters at t-1
+    T m_t1; // 1st moment at t-1
+    T v_t1; // 2nd moment at t-1
     if (t == 0) {
         g_t = 0;
         m_t1 = 0;
     } else {
-        g_t = gradients[i];
-        m_t1 = moments[i];
+        g_t  = parameters.LoadGradient(index);
+        m_t1 = parameters.LoadMoment1(index);
+        v_t1 = parameters.LoadMoment2(index);
     }
 
     // compute moments at t
-    const float2 m_t = lerp(float2(g_t, g_t * g_t), m_t1, decayRates);
+    const T m_t = lerp(g_t,       m_t1, decayRates.x);
+    const T v_t = lerp(g_t * g_t, v_t1, decayRates.y);
 
-    moments[i] = m_t;
+    parameters.StoreMoment1(index, m_t);
+    parameters.StoreMoment2(index, v_t);
 
-    /*
-
-    // compute bias-corrected moments at t
-    const float2 mhat_t = m_t / (1 - pow(decayRates, t));
-
-    const float dx = stepSize * mhat_t.x / (sqrt(mhat_t.y) + kEpsilon);
-
-    /*/
-
-    const float2 a = 1 - pow(decayRates, t);
-    const float alpha_t = stepSize * sqrt(a.y) / a.x;
+    const float2 fac = 1 - pow(decayRates, t);
+    const float alpha_t = stepSize * sqrt(fac.y) / fac.x;
+    
+    const T delta = -alpha_t * m_t / (sqrt(v_t) + kEpsilon);
 
     // compute parameters at t
-    const float dx = alpha_t * m_t.x / (sqrt(m_t.y) + kEpsilon);
-
-    //*/
-
-    // compute parameters at t
-    if (all(dx == dx) && !any(isnan(dx)))
-        parameters[i] -= dx;
-
+    if (all(delta == delta) && !any(isnan(delta))) {
+        const T prev = parameters.Load(index);
+        parameters.Store(index, prev + delta);
+    }
 }

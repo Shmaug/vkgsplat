@@ -11,13 +11,13 @@ using namespace RoseEngine;
 namespace vkgsplat {
 
 struct PointCloudRenderer {
-	PipelineCache createSortPairsPipeline = PipelineCache(FindShaderPath("CreateSortPairs.cs.slang"));
-	PipelineCache rasterPointsPipeline = PipelineCache({
+	PipelineCache createSortPairs = PipelineCache(FindShaderPath("CreateSortPairs.cs.slang"));
+	PipelineCache rasterPoints = PipelineCache({
 		{ FindShaderPath("PointCloudRenderer.3d.slang"), "meshmain" },
 		{ FindShaderPath("PointCloudRenderer.3d.slang"), "fsmain" }
 	});
-	PipelineCache computeRenderPipeline    = PipelineCache(FindShaderPath("PointCloudRenderer.cs.slang"), "render");
-	PipelineCache computeRenderBwdPipeline = PipelineCache(FindShaderPath("PointCloudRenderer.cs.slang"), "render_bwd");
+	PipelineCache computeRender    = PipelineCache(FindShaderPath("PointCloudRenderer.cs.slang"), "render");
+	PipelineCache computeRenderBwd = PipelineCache(FindShaderPath("PointCloudRenderer.cs.slang"), "__bwd_render");
 	float pointSize = 0.05f;
 	float percentToDraw = 1.0f;
     
@@ -29,85 +29,38 @@ struct PointCloudRenderer {
     }
 
     inline BufferRange<uint2> Sort(CommandContext& context, const PointCloud& pointCloud, const Transform& sceneToCamera, const Transform& projection) {
-        const uint32_t vertexCount = (uint32_t)pointCloud.vertices.size();
+        const uint32_t vertexCount = (uint32_t)pointCloud.size();
         BufferRange<uint2> sortPairs = context.GetTransientBuffer<uint2>(vertexCount, vk::BufferUsageFlagBits::eStorageBuffer);
     
         context.PushDebugLabel("Sort points");
         ShaderParameter params = {};
         params["sortPairs"] = (BufferParameter)sortPairs;
-        params["vertices"]  = (BufferParameter)pointCloud.vertices;
+        params["vertices"]  = (BufferParameter)pointCloud.vertices.data;
         params["view"] = sceneToCamera.transform;
         params["vertexCount"] = vertexCount;
         params["zSign"] = (int32_t)(projection.transform[2][2] > 0 ? 1 : -1);
-        context.Dispatch(*createSortPairsPipeline.get(context.GetDevice()), vertexCount, params);
-
+        createSortPairs(context, uint3(vertexCount,1,1), params);
         radixSort(context, sortPairs);
         context.PopDebugLabel();
 
         return sortPairs;
     }
     
-	inline void RenderGradients(
-        CommandContext&   context,
-        const ImageView&  renderTarget,
-        const PointCloud& pointCloud,
-        const Transform&  sceneToCamera,
-        const Transform&  projection,
-        const ImageView&  referenceImage,
-        const BufferRange<float>& loss,
-        const BufferRange<float3>& vertexGradients,
-        const BufferRange<float4>& vertexColorGradients) {
-        const uint32_t vertexCount = (uint32_t)pointCloud.vertices.size();
-		if (vertexCount == 0)
-        {
-            context.ClearColor(renderTarget, vk::ClearColorValue{std::array<float,4>{ 0, 0, 0, 1 }});
-            return;
-        }
-        
-        // sort points
-        BufferRange<uint2> sortPairs = Sort(context, pointCloud, sceneToCamera, projection);
-    
-        const uint2 renderExtent = renderTarget.Extent();
-
-        ImageView pixelVertexCounts = ImageView::Create(context.GetTransientImage(
-            uint3(renderExtent, 1),
-            vk::Format::eR32Uint,
-            vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eStorage));
-
-        ShaderParameter params = {};
-        params["pointCloud"] = pointCloud.GetShaderParameter();
-        params["pointCloud"]["numVertices"] = (uint32_t)(percentToDraw*vertexCount);
-        params["pointCloud"]["vertices_d"] = (BufferParameter)vertexGradients;
-        params["pointCloud"]["colors_d"]   = (BufferParameter)vertexColorGradients;
-        params["sortPairs"] = (BufferParameter)sortPairs;
-        params["outputColor"] = ImageParameter{.image = renderTarget,   .imageLayout = vk::ImageLayout::eGeneral};
-        params["reference" ]  = ImageParameter{.image = referenceImage, .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal};
-        params["outputLoss"] = (BufferParameter)loss;
-        params["pixelVertexCounts"] = ImageParameter{.image = pixelVertexCounts, .imageLayout = vk::ImageLayout::eGeneral};
-        params["view"] = sceneToCamera;
-        params["projection"] = projection;
-        params["outputExtent"] = renderExtent;
-        params["pointSize"] = pointSize;
-
-        context.Dispatch(*computeRenderPipeline.get(context.GetDevice(), { { "OUTPUT_LOSS", loss ? "1" : "0" } }), renderExtent, params);
-
-        context.Dispatch(*computeRenderBwdPipeline.get(context.GetDevice(), { { "OUTPUT_LOSS", "0" } }), renderExtent, params);
-    }
-
 	inline void Render(
         CommandContext&   context,
         const ImageView&  renderTarget,
         const PointCloud& pointCloud,
         const Transform&  sceneToCamera,
-        const Transform&  projection) {
-        const uint32_t vertexCount = (uint32_t)pointCloud.vertices.size();
+        const Transform&  projection,
+        BufferRange<uint2> sortPairs = {}) {
+        const uint32_t vertexCount = (uint32_t)pointCloud.size();
 		if (vertexCount == 0)
         {
             context.ClearColor(renderTarget, vk::ClearColorValue{std::array<float,4>{ 0, 0, 0, 1 }});
             return;
         }
-        
-        BufferRange<uint2> sortPairs = Sort(context, pointCloud, sceneToCamera, projection);
+
+        if (!sortPairs) sortPairs = Sort(context, pointCloud, sceneToCamera, projection);
         
         const uint2 renderExtent = renderTarget.Extent();
 
@@ -148,7 +101,7 @@ struct PointCloudRenderer {
             .dynamicStates = { vk::DynamicState::eViewport, vk::DynamicState::eScissor },
             .dynamicRenderingState = DynamicRenderingState{
                 .colorFormats = { renderTarget.GetImage()->Info().format } } };
-        Pipeline& drawPipeline = *rasterPointsPipeline.get(context.GetDevice(), defines, pipelineInfo).get();
+        Pipeline& drawPipeline = *rasterPoints.get(context.GetDevice(), defines, pipelineInfo).get();
         auto drawDescriptorSets = context.GetDescriptorSets(*drawPipeline.Layout());
 
         // prepare draw parameters
@@ -204,6 +157,51 @@ struct PointCloudRenderer {
     
         context->endRendering();
 	}
+
+	inline void RenderGradients(
+        CommandContext&   context,
+        const ImageView&  renderTarget,
+        const PointCloud& pointCloud,
+        const Transform&  sceneToCamera,
+        const Transform&  projection,
+        const ImageView&  referenceImage,
+        const BufferRange<float>& loss) {
+        const uint32_t vertexCount = (uint32_t)pointCloud.size();
+		if (vertexCount == 0)
+        {
+            context.ClearColor(renderTarget, vk::ClearColorValue{std::array<float,4>{ 0, 0, 0, 1 }});
+            return;
+        }
+        
+        // sort points
+        BufferRange<uint2> sortPairs = Sort(context, pointCloud, sceneToCamera, projection);
+    
+        const uint2 renderExtent = renderTarget.Extent();
+
+        ImageView pixelVertexCounts = ImageView::Create(context.GetTransientImage(
+            uint3(renderExtent, 1),
+            vk::Format::eR32Uint,
+            vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eStorage));
+
+        ShaderParameter params = {};
+        params["pointCloud"] = pointCloud.GetShaderParameter();
+        params["pointCloud"]["numVertices"] = (uint32_t)(percentToDraw*vertexCount);
+        params["sortPairs"] = (BufferParameter)sortPairs;
+        params["outputColor"] = ImageParameter{.image = renderTarget,   .imageLayout = vk::ImageLayout::eGeneral};
+        params["reference" ]  = ImageParameter{.image = referenceImage, .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal};
+        params["outputLoss"] = (BufferParameter)loss;
+        params["pixelVertexCounts"] = ImageParameter{.image = pixelVertexCounts, .imageLayout = vk::ImageLayout::eGeneral};
+        params["view"] = sceneToCamera;
+        params["projection"] = projection;
+        params["outputExtent"] = renderExtent;
+        params["pointSize"] = pointSize;
+
+        // forward pass
+        computeRender(context, uint3(renderExtent,1u), params);
+
+        // backward pass
+        computeRenderBwd(context, uint3(renderExtent,1u), params, { { "OUTPUT_LOSS", loss ? "1" : "0" } });
+    }
 };
 
 }

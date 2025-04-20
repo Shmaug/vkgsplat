@@ -7,14 +7,6 @@
 using namespace vkgsplat;
 using namespace RoseEngine;
 
-struct PointCloudOptimizer {
-	PointCloud pointCloud;
-	BufferRange<float3> vertexGradients;
-	BufferRange<float4> vertexColorGradients;
-	BufferRange<float3> vertexMoments;
-	BufferRange<float4> vertexColorMoments;
-};
-
 int main(int argc, const char** argv) {
 	WindowedApp app("GaussianRenderer", {
 		VK_KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -39,8 +31,10 @@ int main(int argc, const char** argv) {
 
 	float resolutionScale = 0.25f;
 	float currentLoss = std::numeric_limits<float>::infinity();
-	bool runOptimization = false;
-	PointCloudOptimizer optimizedScene;
+	bool runOptimizer = false;
+	// cache initial data so we can quickly restart optimization
+	BufferRange<float3> initialVertices;
+	BufferRange<float4> initialVertexColors;
 	ImageView viewportRenderTarget;
 	ImageView inputViewRenderTarget;
 	ImageView optimizerRenderTarget;
@@ -48,6 +42,9 @@ int main(int argc, const char** argv) {
 	std::queue<std::pair<BufferRange<float>, uint64_t>> lossCpuQueue;
 
 	auto stepOptimizer = [&](CommandContext& context) {
+		if (adam.t == 0)
+			currentLoss = -1;
+
 		BufferRange<float> lossBuf;
 		BufferRange<float> lossCpu;
 		if (!lossCpuQueue.empty()) {
@@ -62,23 +59,6 @@ int main(int argc, const char** argv) {
 		lossCpuQueue.push({ lossCpu, context.GetDevice().NextTimelineSignal() });
 		lossBuf = context.GetTransientBuffer<float>(1, vk::BufferUsageFlagBits::eStorageBuffer|vk::BufferUsageFlagBits::eTransferSrc|vk::BufferUsageFlagBits::eTransferDst);
 
-		const vk::DeviceSize vertexCount = scene.pointCloud.vertices.size();
-		if (!optimizedScene.pointCloud.vertices || optimizedScene.pointCloud.vertices.size() != vertexCount) {
-			optimizedScene.pointCloud.vertices     = Buffer::Create(context.GetDevice(),   sizeof(float3)*vertexCount, vk::BufferUsageFlagBits::eStorageBuffer|vk::BufferUsageFlagBits::eTransferDst);
-			optimizedScene.pointCloud.vertexColors = Buffer::Create(context.GetDevice(),   sizeof(float4)*vertexCount, vk::BufferUsageFlagBits::eStorageBuffer|vk::BufferUsageFlagBits::eTransferDst);
-			optimizedScene.vertexGradients         = Buffer::Create(context.GetDevice(),   sizeof(float3)*vertexCount, vk::BufferUsageFlagBits::eStorageBuffer|vk::BufferUsageFlagBits::eTransferDst);
-			optimizedScene.vertexColorGradients    = Buffer::Create(context.GetDevice(),   sizeof(float4)*vertexCount, vk::BufferUsageFlagBits::eStorageBuffer|vk::BufferUsageFlagBits::eTransferDst);
-			optimizedScene.vertexMoments           = Buffer::Create(context.GetDevice(), 2*sizeof(float3)*vertexCount, vk::BufferUsageFlagBits::eStorageBuffer|vk::BufferUsageFlagBits::eTransferDst);
-			optimizedScene.vertexColorMoments      = Buffer::Create(context.GetDevice(), 2*sizeof(float4)*vertexCount, vk::BufferUsageFlagBits::eStorageBuffer|vk::BufferUsageFlagBits::eTransferDst);
-			adam.reset();
-		}
-
-		if (adam.t == 0) {
-			context.Copy(scene.pointCloud.vertices,     optimizedScene.pointCloud.vertices);
-			context.Copy(scene.pointCloud.vertexColors, optimizedScene.pointCloud.vertexColors);
-			currentLoss = -1;
-		}
-
 		const uint32_t imageIndex = rand() % scene.numTrainCameras;
 		const Transform view = Transform{ scene.viewTransformsCpu[imageIndex] };
 		const Transform proj = Transform{ scene.projectionTransformsCpu[imageIndex] };
@@ -92,7 +72,7 @@ int main(int argc, const char** argv) {
 				Image::Create(context.GetDevice(), ImageInfo{
 					.format = vk::Format::eR16G16B16A16Sfloat,
 					.extent = uint3(scaledExtent, 1u),
-					.usage = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eStorage,
+					.usage = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eStorage,
 					.queueFamilies = { context.QueueFamily() } }));
 		}
 		if (isExtentScaled) {
@@ -114,18 +94,20 @@ int main(int argc, const char** argv) {
 		}
 
 		context.Fill(lossBuf, 0.f);
-		context.Fill(optimizedScene.vertexGradients.cast<float>(), 0.f);
-		context.Fill(optimizedScene.vertexColorGradients.cast<float>(), 0.f);
+		scene.pointCloud.vertices.clearGradients(context);
+		scene.pointCloud.vertexColors.clearGradients(context);
 
-		renderer.RenderGradients(context, optimizerRenderTarget, optimizedScene.pointCloud, view, proj, refImg, lossBuf, optimizedScene.vertexGradients, optimizedScene.vertexColorGradients);
+		renderer.RenderGradients(context, optimizerRenderTarget, scene.pointCloud, view, proj, refImg, lossBuf);
 
 		context.Copy(lossBuf, lossCpu);
 
-		adam(context, optimizedScene.pointCloud.vertices,     optimizedScene.vertexGradients,      optimizedScene.vertexMoments);
-		adam(context, optimizedScene.pointCloud.vertexColors, optimizedScene.vertexColorGradients, optimizedScene.vertexColorMoments);
+		adam(context, scene.pointCloud.vertices);
+		adam(context, scene.pointCloud.vertexColors);
+		adam.increment();
 	};
 
 	auto openSceneDialog = [&]() {
+		auto& context = app.CurrentContext();
 		auto f = pfd::open_file(
 			"Choose scene",
 			"",
@@ -134,9 +116,16 @@ int main(int argc, const char** argv) {
 		);
 		for (const std::string& filepath : f.result()) {
 			app.device->Wait();
-			scene.Load(app.CurrentContext(), filepath);
+
+			scene.Load(context, filepath);
+
+			// backup initial data
+			initialVertices     = Buffer::Create(context.GetDevice(), scene.pointCloud.vertices.data.size_bytes(),     vk::BufferUsageFlagBits::eTransferDst|vk::BufferUsageFlagBits::eTransferSrc);
+			initialVertexColors = Buffer::Create(context.GetDevice(), scene.pointCloud.vertexColors.data.size_bytes(), vk::BufferUsageFlagBits::eTransferDst|vk::BufferUsageFlagBits::eTransferSrc);
+			context.Copy(scene.pointCloud.vertices.data,     initialVertices);
+			context.Copy(scene.pointCloud.vertexColors.data, initialVertexColors);
+
 			adam.reset();
-			optimizedScene = {};
 		}
 	};
 
@@ -160,7 +149,7 @@ int main(int argc, const char** argv) {
 
 		if (ImGui::CollapsingHeader("Scene")) {
 			ImGui::Text("%u views (%u train)", scene.images.size(), scene.numTrainCameras);
-			ImGui::Text("%u vertices", scene.pointCloud.vertices.size());
+			ImGui::Text("%u vertices", scene.pointCloud.size());
 			ImGui::DragFloat3("Translation", &sceneTranslation.x, 0.1f);
 			ImGui::DragFloat3("Rotation", &sceneRotation.x, float(M_1_PI)*0.1f, -float(M_PI), float(M_PI));
 			ImGui::DragFloat("Scale", &sceneScale, 0.01f, 0.f, 1000.f);
@@ -176,9 +165,16 @@ int main(int argc, const char** argv) {
 		}
 
 		if (ImGui::CollapsingHeader("Optimizer")) {
-			ImGui::Checkbox("Run", &runOptimization);
+			ImGui::Checkbox("Run", &runOptimizer);
 			ImGui::SameLine();
-			if (ImGui::Button("Reset")) adam.reset();
+			if (ImGui::Button("Reset")) {
+				adam.reset();
+				if (scene.pointCloud.vertices) {
+					// restore initial data
+					app.CurrentContext().Copy(initialVertices,     scene.pointCloud.vertices.data);
+					app.CurrentContext().Copy(initialVertexColors, scene.pointCloud.vertexColors.data);
+				}
+			}
 			
 			ImGui::DragFloat("Step size", &adam.stepSize, 0.001f, 0, 1.f);
 			ImGui::DragFloat2("Decay rates", &adam.decay1, 0.001f, 0, 1.0f - 1e-6f);
@@ -203,7 +199,7 @@ int main(int argc, const char** argv) {
 
 		auto& context = app.CurrentContext();
 
-		if (runOptimization && !scene.images.empty()) stepOptimizer(context);
+		if (runOptimizer && !scene.images.empty()) stepOptimizer(context);
 
 		const float2 extentf = std::bit_cast<float2>(ImGui::GetWindowContentRegionMax()) - std::bit_cast<float2>(ImGui::GetWindowContentRegionMin());
 		const uint2 extent = uint2(extentf);
@@ -227,7 +223,7 @@ int main(int argc, const char** argv) {
 
         const Transform view = inverse(camera.GetCameraToWorld()) * getSceneToWorld();
 		const Transform proj = camera.GetProjection(extentf.x / extentf.y);
-		renderer.Render(context, viewportRenderTarget, adam.t > 0 ? optimizedScene.pointCloud : scene.pointCloud, view, proj);
+		renderer.Render(context, viewportRenderTarget, scene.pointCloud, view, proj);
 		
 		// compute alpha = 1 - T
 		{
@@ -267,7 +263,7 @@ int main(int argc, const char** argv) {
 
 					const Transform view = Transform{ scene.viewTransformsCpu[selectedView] };
 					const Transform proj = Transform{ scene.projectionTransformsCpu[selectedView] };
-					renderer.Render(context, inputViewRenderTarget, adam.t > 0 ? optimizedScene.pointCloud : scene.pointCloud, view, proj);
+					renderer.Render(context, inputViewRenderTarget, scene.pointCloud, view, proj);
 
 					// compute alpha = 1 - T
 					{

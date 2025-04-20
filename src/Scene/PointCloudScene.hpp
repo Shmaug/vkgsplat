@@ -2,20 +2,23 @@
 
 #include <json.hpp>
 #include <Rose/RadixSort/RadixSort.hpp>
+#include "Adam/BufferGradient.hpp"
 
 namespace vkgsplat {
 
 using namespace RoseEngine;
 
 struct PointCloud {
-	BufferRange<float3> vertices;
-	BufferRange<float4> vertexColors;
+	BufferGradient<3> vertices;
+	BufferGradient<4> vertexColors;
+
+	inline vk::DeviceSize size() const { return vertices.size(); }
 
 	inline ShaderParameter GetShaderParameter() const {
 		ShaderParameter params = {};
-		params["vertices"]    = (BufferParameter)vertices;
-		params["colors"]      = (BufferParameter)vertexColors;
-		params["numVertices"] = (uint32_t)vertices.size();
+		params["vertices"]    = vertices.GetShaderParameter();
+		params["colors"]      = vertexColors.GetShaderParameter();
+		params["numVertices"] = (uint32_t)size();
 		return params;
 	}
 };
@@ -84,9 +87,19 @@ struct PointCloudScene {
 		vertexColors.reserve(pointCloudData["colors"].size());
 		for (const auto& v : pointCloudData["points"]) vertices    .emplace_back(v[0].get<float>(), v[1].get<float>(), v[2].get<float>());
 		for (const auto& v : pointCloudData["colors"]) vertexColors.emplace_back(v[0].get<float>(), v[1].get<float>(), v[2].get<float>(), 1.0f);
+
+		auto createGradientBuf = [&]<int N>(const std::vector<glm::vec<N,float>>& data) {
+			auto buf = context.UploadData(data, vk::BufferUsageFlagBits::eStorageBuffer|vk::BufferUsageFlagBits::eTransferSrc|vk::BufferUsageFlagBits::eTransferDst);
+			return BufferGradient<N> {
+				.data      = buf,
+				.gradients = Buffer::Create(context.GetDevice(), buf.size_bytes(), vk::BufferUsageFlagBits::eStorageBuffer|vk::BufferUsageFlagBits::eTransferDst),
+				.moments1  = Buffer::Create(context.GetDevice(), buf.size_bytes(), vk::BufferUsageFlagBits::eStorageBuffer),
+				.moments2  = Buffer::Create(context.GetDevice(), buf.size_bytes(), vk::BufferUsageFlagBits::eStorageBuffer)
+			};
+		};
 		
-		pointCloud.vertices     = context.UploadData(vertices,     vk::BufferUsageFlagBits::eStorageBuffer|vk::BufferUsageFlagBits::eTransferSrc);
-		pointCloud.vertexColors = context.UploadData(vertexColors, vk::BufferUsageFlagBits::eStorageBuffer|vk::BufferUsageFlagBits::eTransferSrc);
+		pointCloud.vertices     = createGradientBuf(vertices);
+		pointCloud.vertexColors = createGradientBuf(vertexColors);
 	}
 };
 

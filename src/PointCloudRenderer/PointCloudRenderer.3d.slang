@@ -54,8 +54,8 @@ void meshmain(
     if (groupBasePointId + localIdx < pointCloud.numVertices)
     {
         const uint sortedVertexId = sortPairs[groupBasePointId + localIdx].y;
-        vertex       = pointCloud.LoadVertex(sortedVertexId);
-        vertexColor  = pointCloud.LoadVertexColor(sortedVertexId);
+        vertex       = pointCloud.vertices.Load(sortedVertexId);
+        vertexColor  = pointCloud.colors  .Load(sortedVertexId);
         
         float3 viewVertex = mul(view, float4(vertex, 1)).xyz;
         const float4 ndc = mul(projection, float4(viewVertex, 1));
